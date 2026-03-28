@@ -305,9 +305,10 @@ async function handleAddTeam(e) {
 
 async function handleAddPlayer(e) {
     e.preventDefault();
+
+    // Remember selected team before any resets
     const teamId     = document.getElementById('playerTeamSelect').value;
     const playerName = document.getElementById('playerName').value.trim();
-    const playerRole = document.getElementById('playerRole').value;
 
     // Fetch current players array then append
     const { data: teamData, error: fetchErr } = await db
@@ -316,14 +317,22 @@ async function handleAddPlayer(e) {
 
     const updatedPlayers = [
         ...(teamData.players || []),
-        { id: Date.now().toString(), name: playerName, role: playerRole }
+        { id: Date.now().toString(), name: playerName }
     ];
 
     const { error } = await db.from('teams').update({ players: updatedPlayers }).eq('id', teamId);
     if (error) { showMessage('Error adding player: ' + error.message); return; }
     showMessage('Player added successfully!');
-    document.getElementById('addPlayerForm').reset();
-    loadTeamsManagement();
+
+    // Only reset the player name field — keep team selector on current team
+    document.getElementById('playerName').value = '';
+
+    // Reload team data but restore the team selection after
+    await loadTeamsManagement();
+
+    // Re-select the previously chosen team
+    const sel = document.getElementById('playerTeamSelect');
+    if (sel) sel.value = teamId;
 }
 
 async function loadTeamsManagement() {
@@ -333,6 +342,9 @@ async function loadTeamsManagement() {
     const playerTeamSel  = document.getElementById('playerTeamSelect');
     const matchTeam1Sel  = document.getElementById('matchTeam1');
     const matchTeam2Sel  = document.getElementById('matchTeam2');
+
+    // Save current selection before rebuilding
+    const prevTeamId = playerTeamSel.value;
 
     playerTeamSel.innerHTML = '<option value="">-- Select Team --</option>';
     matchTeam1Sel.innerHTML  = '<option value="">-- Select Team 1 --</option>';
@@ -353,12 +365,15 @@ async function loadTeamsManagement() {
             <div class="players-list">
                 <strong>Players:</strong>
                 ${team.players?.length
-                    ? team.players.map(p => `<div class="player-name">• ${p.name} — ${p.role}</div>`).join('')
+                    ? team.players.map(p => `<div class="player-name">• ${p.name}</div>`).join('')
                     : '<div class="player-name">No players added yet</div>'
                 }
             </div>`;
         teamsList.appendChild(item);
     });
+
+    // Restore previous team selection if it still exists
+    if (prevTeamId) playerTeamSel.value = prevTeamId;
 }
 
 // ========================================
@@ -385,14 +400,11 @@ async function loadPublicTeams() {
         card.className = 'public-team-card';
 
         const playersHTML = team.players?.length
-            ? team.players.map(p => {
-                const roleClass = p.role.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z-]/g, '');
-                return `<div class="public-player-item">
+            ? team.players.map(p => `
+                <div class="public-player-item">
                     <span class="public-player-name">${p.name}</span>
-                    <span class="public-player-role ${roleClass}">${p.role}</span>
-                </div>`;
-              }).join('')
-            : '<p class="no-data-msg">No players yet</p>';
+                </div>`).join('')
+            : '<div class="public-player-item"><span class="public-player-name" style="color:var(--white-40);font-style:italic;">No players yet</span></div>';
 
         card.innerHTML = `
             <div class="public-team-header">
@@ -1055,7 +1067,6 @@ function _clearStatusBanners() {
 }
 
 function _showAllOutBanner(inn, match) {
-    // Visually distinct red ALL OUT banner — separate from overs-complete
     let banner = document.getElementById('allOutBanner');
     if (!banner) {
         banner = document.createElement('div');
@@ -1157,8 +1168,6 @@ async function confirmToss() {
 
 // ========================================
 // START INNINGS
-// Fetches batting team roster to compute
-// maxWickets = roster_size - 1 (min 1)
 // ========================================
 async function startInnings() {
     const match      = currentScoringMatch;
@@ -1176,7 +1185,7 @@ async function startInnings() {
     // Determine maxWickets from actual roster (supports non-11 teams)
     const { data: teamData } = await db.from('teams').select('players').eq('id', battingTeam.id).single();
     const rosterSize = teamData?.players?.length || 11;
-    const maxWickets = Math.max(rosterSize - 1, 1);   // must have at least 1
+    const maxWickets = Math.max(rosterSize - 1, 1);
 
     const newInnings = {
         inningsNumber:    inningsIdx + 1,
@@ -1187,8 +1196,8 @@ async function startInnings() {
         runs: 0, wickets: 0, balls: 0,
         batsmen: [], bowlers: [],
         striker: null, nonStriker: null, bowler: null, thisOver: [],
-        maxWickets,   // stored so we can check without refetching
-        allOut: false // explicit flag — set true when wickets hit maxWickets
+        maxWickets,
+        allOut: false
     };
 
     const updatedInnings = [...(match.innings || []), newInnings];
@@ -1213,8 +1222,6 @@ async function showBatsmenSelection() {
     const inn   = match.innings[match.current_innings - 1];
     const { data: teamData } = await db.from('teams').select('players').eq('id', inn.battingTeamId).single();
     const players = teamData?.players || [];
-    // Only exclude players who are currently active (not out) — don't exclude out batsmen
-    // For a fresh innings, batsmen array is empty so everyone is available
     const usedIds = (inn.batsmen || []).filter(b => !b.isOut).map(b => b.id);
 
     const strikerSel    = document.getElementById('strikerSelect');
@@ -1234,7 +1241,6 @@ async function showBatsmenSelection() {
         });
     }
 
-    // Update heading to reflect context
     const heading = document.querySelector('#batsmenSelection h4');
     if (heading) {
         heading.textContent = inn.inningsNumber === 1 ? 'Select Opening Batsmen' : 'Select Opening Batsmen (2nd Innings)';
@@ -1274,7 +1280,6 @@ async function confirmBatsmen() {
     const inn     = { ...innings[idx] };
     const batsmen = [...(inn.batsmen || [])];
 
-    // Add batsmen only if not already in the list
     if (!batsmen.find(b => b.id === sid)) batsmen.push({ id: sid, name: sname, runs: 0, balls: 0, fours: 0, sixes: 0, isOut: false, isStriker: true,  status: 'Not Out' });
     if (!batsmen.find(b => b.id === nid)) batsmen.push({ id: nid, name: nname, runs: 0, balls: 0, fours: 0, sixes: 0, isOut: false, isStriker: false, status: 'Not Out' });
 
@@ -1347,28 +1352,23 @@ async function showWicketModal() {
     const maxWickets  = inn.maxWickets ?? 10;
     const activeBatsmen = (inn.batsmen || []).filter(b => !b.isOut);
 
-    // Batsman-out dropdown
     const wbs = document.getElementById('wicketBatsmanSelect');
     wbs.innerHTML = '<option value="">-- Select --</option>';
     activeBatsmen.forEach(b => wbs.add(new Option(b.name, b.id + '||' + b.name)));
 
-    // Fielder dropdown
     const fs = document.getElementById('fielderSelect');
     fs.innerHTML = '<option value="">-- Select Fielder --</option>';
     const { data: fTeam } = await db.from('teams').select('players').eq('id', inn.fieldingTeamId).single();
     fTeam?.players?.forEach(p => fs.add(new Option(p.name, p.name)));
 
-    // ── New batsman: hide for the last wicket (innings will end) ──
     const newBatsmanGroup = document.getElementById('newBatsmanGroup');
     const nbs             = document.getElementById('newBatsmanSelect');
     const isLastWicket    = (inn.wickets + 1) >= maxWickets;
 
-    // Remove any old notice
     const oldNotice = document.getElementById('lastWicketNotice');
     if (oldNotice) oldNotice.remove();
 
     if (isLastWicket) {
-        // Hide new-batsman field — innings ends after this wicket
         newBatsmanGroup.classList.add('hidden');
         nbs.removeAttribute('required');
         nbs.innerHTML = '<option value="">N/A - innings ending</option>';
@@ -1379,7 +1379,6 @@ async function showWicketModal() {
         notice.innerHTML = `<strong>⚡ LAST WICKET</strong> — This is wicket ${inn.wickets + 1}/${maxWickets}. No new batsman needed; innings will be marked all out.`;
         newBatsmanGroup.insertAdjacentElement('beforebegin', notice);
     } else {
-        // Show new-batsman selection normally
         newBatsmanGroup.classList.remove('hidden');
         nbs.setAttribute('required', '');
         nbs.innerHTML = '<option value="">-- Select New Batsman --</option>';
@@ -1415,18 +1414,15 @@ async function handleWicket(e) {
     const inn        = { ...innings[idx] };
     const maxWickets = inn.maxWickets ?? 10;
 
-    // Guard: overs already complete
     if (inn.balls >= match.total_overs * 6) {
         showMessage(`All ${match.total_overs} overs are complete. Click "End Innings" to continue.`);
         closeWicketModal(); return;
     }
-    // Guard: already all out
     if (inn.allOut) {
         showMessage('Team is already all out. Click "End Innings" to continue.');
         closeWicketModal(); return;
     }
 
-    // Mark batsman dismissed
     inn.batsmen = inn.batsmen.map(b => {
         if (b.id === outId) {
             let status = wicketType;
@@ -1438,23 +1434,18 @@ async function handleWicket(e) {
 
     inn.wickets = (inn.wickets || 0) + 1;
 
-    // Bowler credit for wicket
     const bowlerCredited = ['Bowled', 'Caught', 'LBW', 'Stumped', 'Hit Wicket'];
     if (bowlerCredited.includes(wicketType)) {
         inn.bowlers = inn.bowlers.map(b => b.id === inn.bowler ? { ...b, wickets: (b.wickets||0) + 1 } : b);
     }
 
-    // ── ALL OUT CHECK ─────────────────────────────────────────────
-    // When wickets reach maxWickets there is no new batsman — innings is ALL OUT.
     const isAllOut = inn.wickets >= maxWickets;
 
     if (isAllOut) {
-        // No new batsman — innings ends. Nullify the dismissed batsman's position.
         inn.allOut = true;
         if (outId === inn.striker)    inn.striker    = null;
         else                          inn.nonStriker = null;
     } else if (nbv) {
-        // Normal wicket: bring in new batsman at the dismissed batsman's end
         const [nid, nname] = nbv.split('||');
         inn.batsmen.push({
             id: nid, name: nname, runs: 0, balls: 0,
@@ -1463,7 +1454,6 @@ async function handleWicket(e) {
         if (outId === inn.striker)    inn.striker    = nid;
         else                          inn.nonStriker = nid;
     } else {
-        // nbv not provided but not last wicket — shouldn't happen; fallback
         showMessage('Please select the new batsman.'); return;
     }
 
@@ -1497,7 +1487,6 @@ async function handleWicket(e) {
     lastBalls.push({ innings: JSON.parse(JSON.stringify(innings)) });
     currentScoringMatch = { ...match, innings };
     closeWicketModal();
-    // refreshScoringUI will detect inn.allOut and show the ALL OUT banner
     refreshScoringUI();
 }
 
@@ -1512,7 +1501,6 @@ async function recordBall(runs, isExtra, extraType) {
     const innings = [...match.innings];
     const inn     = { ...innings[idx] };
 
-    // Guards
     if (inn.allOut) {
         showMessage('Team is all out. Click "End Innings" to continue.');
         return;
@@ -1589,7 +1577,6 @@ async function recordBall(runs, isExtra, extraType) {
     lastBalls.push({ innings: JSON.parse(JSON.stringify(innings)) });
     currentScoringMatch = { ...match, innings };
 
-    // Target reached in 2nd innings → auto-complete after showing result
     const targetReached = match.current_innings === 2 && innings.length >= 2 && inn.runs >= innings[0].runs + 1;
     if (targetReached) {
         const maxW = inn.maxWickets ?? 10;
@@ -1614,7 +1601,7 @@ function handleExtra(extraType) {
 }
 
 // ========================================
-// END INNINGS  (always manual — admin only)
+// END INNINGS
 // ========================================
 async function endInnings() {
     if (!confirm('Are you sure you want to end this innings?')) return;
@@ -1695,7 +1682,6 @@ async function undoLastBall() {
     const { error } = await db.from('matches').update({ innings: last.innings }).eq('id', match.id);
     if (error) { showMessage('Error undoing: ' + error.message); return; }
 
-    // Delete the most recent ball record for this match
     const { data } = await db
         .from('balls').select('id').eq('match_id', match.id)
         .order('created_at', { ascending: false }).limit(1);
